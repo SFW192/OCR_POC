@@ -435,6 +435,115 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
                 net_income = metrics.get('net_income')
                 if net_income:
                     st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
+            
+            # Year-over-Year Comparison Charts for Financial Statement
+            if assets_previous > 0 or liabilities_previous > 0:
+                st.markdown("---")
+                st.markdown("### 📊 Year-over-Year Financial Comparison")
+                
+                # Prepare comparison data
+                comparison_data = []
+                
+                if assets_current > 0 or assets_previous > 0:
+                    comparison_data.append({
+                        'Metric': 'Total Assets',
+                        'Previous Year': assets_previous,
+                        'Current Year': assets_current,
+                        'Change': assets_current - assets_previous,
+                        'Change %': ((assets_current - assets_previous) / assets_previous * 100) if assets_previous > 0 else 0
+                    })
+                
+                if liabilities_current > 0 or liabilities_previous > 0:
+                    comparison_data.append({
+                        'Metric': 'Total Liabilities',
+                        'Previous Year': liabilities_previous,
+                        'Current Year': liabilities_current,
+                        'Change': liabilities_current - liabilities_previous,
+                        'Change %': ((liabilities_current - liabilities_previous) / liabilities_previous * 100) if liabilities_previous > 0 else 0
+                    })
+                
+                # Get income and expenses from P&L if available
+                df_pl_check = df_financial[df_financial['statement_type'] == 'pl_statement'].copy() if 'statement_type' in df_financial.columns else pd.DataFrame()
+                
+                if not df_pl_check.empty and 'category' in df_pl_check.columns:
+                    income_current_pl = df_pl_check[df_pl_check['category'] == 'Revenue']['current_year'].sum()
+                    income_previous_pl = df_pl_check[df_pl_check['category'] == 'Revenue']['previous_year'].sum() if 'previous_year' in df_pl_check.columns else 0
+                    
+                    expenses_current_pl = df_pl_check[df_pl_check['category'] == 'Expenses']['current_year'].sum()
+                    expenses_previous_pl = df_pl_check[df_pl_check['category'] == 'Expenses']['previous_year'].sum() if 'previous_year' in df_pl_check.columns else 0
+                    
+                    if income_current_pl > 0 or income_previous_pl > 0:
+                        comparison_data.append({
+                            'Metric': 'Total Income',
+                            'Previous Year': income_previous_pl,
+                            'Current Year': income_current_pl,
+                            'Change': income_current_pl - income_previous_pl,
+                            'Change %': ((income_current_pl - income_previous_pl) / income_previous_pl * 100) if income_previous_pl > 0 else 0
+                        })
+                    
+                    if expenses_current_pl > 0 or expenses_previous_pl > 0:
+                        comparison_data.append({
+                            'Metric': 'Total Expenses',
+                            'Previous Year': expenses_previous_pl,
+                            'Current Year': expenses_current_pl,
+                            'Change': expenses_current_pl - expenses_previous_pl,
+                            'Change %': ((expenses_current_pl - expenses_previous_pl) / expenses_previous_pl * 100) if expenses_previous_pl > 0 else 0
+                        })
+                
+                if comparison_data:
+                    df_comparison = pd.DataFrame(comparison_data)
+                    
+                    # Create grouped bar chart
+                    fig_comparison = go.Figure()
+                    
+                    fig_comparison.add_trace(go.Bar(
+                        name='Previous Year',
+                        x=df_comparison['Metric'],
+                        y=df_comparison['Previous Year'],
+                        text=[f'{currency_symbol}{v:,.0f}' for v in df_comparison['Previous Year']],
+                        textposition='outside',
+                        marker_color='#FF6B6B',
+                        hovertemplate='<b>%{x}</b><br>Previous Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
+                    ))
+                    
+                    fig_comparison.add_trace(go.Bar(
+                        name='Current Year',
+                        x=df_comparison['Metric'],
+                        y=df_comparison['Current Year'],
+                        text=[f'{currency_symbol}{v:,.0f}' for v in df_comparison['Current Year']],
+                        textposition='outside',
+                        marker_color='#4ECDC4',
+                        hovertemplate='<b>%{x}</b><br>Current Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
+                    ))
+                    
+                    fig_comparison.update_layout(
+                        barmode='group',
+                        xaxis_title='Financial Metrics',
+                        yaxis_title=f'Amount ({currency_symbol})',
+                        height=500,
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1
+                        ),
+                        yaxis=dict(tickformat=',.0f'),
+                        xaxis={'tickangle': 0}
+                    )
+                    
+                    st.plotly_chart(fig_comparison, use_container_width=True)
+                    
+                    # Display comparison table
+                    st.markdown("#### 📋 Detailed Comparison Table")
+                    
+                    display_comparison = df_comparison.copy()
+                    display_comparison['Previous Year'] = display_comparison['Previous Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
+                    display_comparison['Current Year'] = display_comparison['Current Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
+                    display_comparison['Change'] = display_comparison['Change'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
+                    display_comparison['Change %'] = display_comparison['Change %'].apply(lambda x: f'{x:+.2f}%')
+                    
+                    st.dataframe(display_comparison, use_container_width=True, hide_index=True)
         
         # Balance Sheet Visualization
         if not df_bs.empty and 'current_year' in df_bs.columns:
@@ -792,7 +901,7 @@ def main():
         # OCR each page and concatenate text
         full_texts = []
         confidences = []
-        with st.spinner("Running OCR..."):
+        with st.spinner("Running OCR (Google Vision API)..."):
             for i, img in enumerate(images):
                 try:
                     img_bytes = prepare_image_for_vision(img)
@@ -817,8 +926,8 @@ def main():
     st.expander("📄 Show OCR text", expanded=False).text(st.session_state.ocr_text[:20000] or "No text recognized")
     
     # Extract structured data button
-    if st.button("Extract Structured Financial Data", type="primary"):
-        with st.spinner("Extracting structured data AI..."):
+    if st.button("Extract Structured Financial Data (Groq)", type="primary"):
+        with st.spinner("Extracting structured data with Groq AI..."):
             groq_data = extract_financial_data_with_groq(st.session_state.ocr_text)
         
         if groq_data is None:
