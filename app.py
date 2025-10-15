@@ -1,4 +1,3 @@
-
 # streamlit_app.py
 """
 Universal Financial Document OCR using Google Cloud Vision API + Groq AI
@@ -656,10 +655,6 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
 # -------------------------
 # Login Page
 # -------------------------
-# -------------------------
-# (Replace the tail of your file with the corrected login page closure + main)
-# -------------------------
-
 def show_login_page():
     """Display login page with SFW Technologies branding"""
     
@@ -667,19 +662,21 @@ def show_login_page():
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
-        # Display logo
-        st.markdown("<div style='text-align: center; margin-bottom: 30px;'>", unsafe_allow_html=True)
+        # Display logo centered
         try:
-            st.image(
-                "https://softworkstech.com/wp-content/uploads/2022/09/softworklogo.svg",
-                width=400
-            )
+            col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
+            with col_logo2:
+                st.image(
+                    "https://softworkstech.com/wp-content/uploads/2022/09/softworklogo.svg",
+                    use_container_width=True
+                )
         except:
-            st.markdown("### 🏢 SFW Technologies")
-        st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("<h3 style='text-align: center;'>🏢 SFW Technologies</h3>", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
         
         # Login form
-        st.markdown("### 🔐 Login to Financial Document OCR")
+        st.markdown("<h3 style='text-align: center;'>🔐 Login to Financial Document OCR</h3>", unsafe_allow_html=True)
         st.markdown("---")
         
         with st.form("login_form"):
@@ -692,7 +689,7 @@ def show_login_page():
                     st.session_state.logged_in = True
                     st.session_state.username = username
                     st.success("✅ Login successful!")
-                    # no explicit rerun call — Streamlit will re-run automatically on interaction
+                    st.rerun()
                 else:
                     st.error("❌ Invalid username or password")
                     st.info("💡 Default credentials:\n- Username: **sfw**\n- Password: **admin**")
@@ -701,11 +698,9 @@ def show_login_page():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
-        <small>🚀 Powered by Google Cloud Vision API + Groq AI | 
-        🇮🇳 Optimized for Indian Financial Documents (₹)</small>
+        <small>© 2025 SFW Technologies. All rights reserved.</small>
     </div>
     """, unsafe_allow_html=True)
-
 
 
 def main():
@@ -728,6 +723,7 @@ def main():
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.username = None
+        st.rerun()
     
     st.title("📥 Upload Financial Document (Invoice / P&L / Balance Sheet)")
     uploaded = st.file_uploader("Upload PDF / PNG / JPG (max 10MB)", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=False)
