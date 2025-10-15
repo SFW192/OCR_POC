@@ -1,0 +1,10 @@
+google-cloud-vision
+google-auth
+groq
+Pillow
+pdf2image
+pandas
+numpy
+plotly
+python-dateutil
+python-dotenv
