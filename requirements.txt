@@ -1,10 +1,10 @@
+streamlit
+pillow
 google-cloud-vision
 google-auth
 groq
-Pillow
-pdf2image
+python-dotenv
 pandas
 numpy
 plotly
-python-dateutil
-python-dotenv
+pdf2image
