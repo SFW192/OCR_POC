@@ -134,7 +134,7 @@ Document Text:
 
 For Balance Sheet or Financial Statement documents, extract ALL major categories with their values.
 For P&L Statements, extract all revenue and expense line items.
-For Invoices/Receipts, extract line items with roles/categories.
+For Invoices/Receipts, extract line items with roles/categories and ALL tax components.
 
 Return JSON with this structure (use null for missing data):
 {{
@@ -148,7 +148,12 @@ Return JSON with this structure (use null for missing data):
     "currency": "INR|USD|EUR|GBP",
     "amounts": {{
         "subtotal": number_or_null,
+        "taxable_value": number_or_null,
+        "cgst": number_or_null,
+        "sgst": number_or_null,
+        "igst": number_or_null,
         "tax": number_or_null,
+        "total_tax": number_or_null,
         "discount": number_or_null,
         "total": number_or_null,
         "paid": number_or_null,
@@ -157,7 +162,7 @@ Return JSON with this structure (use null for missing data):
     "line_items": [
         {{
             "description": "item description",
-            "role": "Java|Flutter|Python|DevOps|QA|Design|Other or null",
+            "role": "Java|Flutter|Python|DevOps|QA|Design|Angular|Other or null",
             "quantity": number_or_null,
             "unit_price": number_or_null,
             "amount": number,
@@ -200,21 +205,21 @@ Return JSON with this structure (use null for missing data):
     "notes": "additional info"
 }}
 
-IMPORTANT: 
-- For balance sheets, populate balance_sheet_items with ALL major line items
-- For P&L statements, populate pl_statement_items with ALL revenue and expense items
-- For invoices, identify the role/category (Java, Flutter, Python, DevOps, QA, Design, etc.) from the description
-- For line items, extract untaxed_amount and tax_amount separately if available
-- Extract actual numerical values from the document - DO NOT calculate or derive values
-- Use null only when data is truly missing
-- For amounts: total = untaxed_amount + tax_amount (if both present in document)
+CRITICAL INSTRUCTIONS:
+- Extract EXACT numbers from the document - DO NOT calculate or derive values
+- For invoices: Extract taxable_value, CGST, SGST, IGST, and total_tax separately
+- For line items: Identify specific roles (Java, Flutter, Angular, Python, DevOps, QA, Design) from descriptions
+- For balance sheets: Extract ALL line items with exact values for both years
+- For financial statements: Extract total_assets, total_liabilities for BOTH current and previous year
+- Use null only when data is truly missing from the document
+- Preserve all numerical precision from the source document
 
 Return ONLY valid JSON, no explanations."""
 
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Extract structured financial data. Return valid JSON only."},
+                {"role": "system", "content": "Extract structured financial data with exact precision. Return valid JSON only."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -314,7 +319,12 @@ def create_dataframes(groq_data: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.D
         'document_date': groq_data.get('document_date'),
         'currency': groq_data.get('currency', 'INR'),
         'subtotal': amounts.get('subtotal'),
+        'taxable_value': amounts.get('taxable_value'),
+        'cgst': amounts.get('cgst'),
+        'sgst': amounts.get('sgst'),
+        'igst': amounts.get('igst'),
         'tax': amounts.get('tax'),
+        'total_tax': amounts.get('total_tax'),
         'discount': amounts.get('discount'),
         'total': amounts.get('total'),
         'paid': amounts.get('paid'),
@@ -366,35 +376,72 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
     st.markdown("### 💰 Financial Summary")
     
     if doc_type in ['balance_sheet', 'financial_statement']:
-        metrics = groq_data.get('financial_metrics', {})
-        col1, col2, col3, col4 = st.columns(4)
+        # Extract totals from balance sheet items
+        df_bs = df_financial[df_financial['statement_type'] == 'balance_sheet'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
         
-        with col1:
-            total_assets = metrics.get('total_assets')
-            if total_assets:
-                st.metric("Total Assets", f"{currency_symbol}{total_assets:,.2f}")
-        with col2:
-            total_liabilities = metrics.get('total_liabilities')
-            if total_liabilities:
-                st.metric("Total Liabilities", f"{currency_symbol}{total_liabilities:,.2f}")
-        with col3:
-            total_equity = metrics.get('total_equity')
-            if total_equity:
-                st.metric("Total Equity", f"{currency_symbol}{total_equity:,.2f}")
-        with col4:
-            net_income = metrics.get('net_income')
-            if net_income:
-                st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
+        if not df_bs.empty:
+            # Calculate totals from balance sheet items
+            if 'category' in df_bs.columns:
+                assets_current = df_bs[df_bs['category'] == 'Assets']['current_year'].sum()
+                assets_previous = df_bs[df_bs['category'] == 'Assets']['previous_year'].sum() if 'previous_year' in df_bs.columns else 0
+                
+                liabilities_current = df_bs[df_bs['category'] == 'Liabilities']['current_year'].sum()
+                liabilities_previous = df_bs[df_bs['category'] == 'Liabilities']['previous_year'].sum() if 'previous_year' in df_bs.columns else 0
+                
+                equity_current = df_bs[df_bs['category'] == 'Equity']['current_year'].sum()
+                equity_previous = df_bs[df_bs['category'] == 'Equity']['previous_year'].sum() if 'previous_year' in df_bs.columns else 0
+            else:
+                assets_current = df_bs['current_year'].sum()
+                assets_previous = df_bs['previous_year'].sum() if 'previous_year' in df_bs.columns else 0
+                liabilities_current = 0
+                liabilities_previous = 0
+                equity_current = 0
+                equity_previous = 0
+            
+            # Display metrics with year-over-year comparison
+            st.markdown("#### Key Financial Metrics Comparison")
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                if assets_current > 0:
+                    delta = assets_current - assets_previous if assets_previous > 0 else None
+                    delta_pct = f"{((assets_current - assets_previous) / assets_previous * 100):+.1f}%" if assets_previous > 0 else None
+                    st.metric("Total Assets (Current)", f"{currency_symbol}{assets_current:,.2f}", 
+                             delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                    if assets_previous > 0:
+                        st.caption(f"Previous: {currency_symbol}{assets_previous:,.2f}")
+            
+            with col2:
+                if liabilities_current > 0:
+                    delta = liabilities_current - liabilities_previous if liabilities_previous > 0 else None
+                    delta_pct = f"{((liabilities_current - liabilities_previous) / liabilities_previous * 100):+.1f}%" if liabilities_previous > 0 else None
+                    st.metric("Total Liabilities (Current)", f"{currency_symbol}{liabilities_current:,.2f}",
+                             delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                    if liabilities_previous > 0:
+                        st.caption(f"Previous: {currency_symbol}{liabilities_previous:,.2f}")
+            
+            with col3:
+                if equity_current > 0:
+                    delta = equity_current - equity_previous if equity_previous > 0 else None
+                    delta_pct = f"{((equity_current - equity_previous) / equity_previous * 100):+.1f}%" if equity_previous > 0 else None
+                    st.metric("Total Equity (Current)", f"{currency_symbol}{equity_current:,.2f}",
+                             delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                    if equity_previous > 0:
+                        st.caption(f"Previous: {currency_symbol}{equity_previous:,.2f}")
+            
+            with col4:
+                metrics = groq_data.get('financial_metrics', {})
+                net_income = metrics.get('net_income')
+                if net_income:
+                    st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
         
         # Balance Sheet Visualization
-        if not df_financial.empty and 'current_year' in df_financial.columns:
+        if not df_bs.empty and 'current_year' in df_bs.columns:
             st.markdown("---")
             st.markdown("### 📈 Balance Sheet Analysis")
             
-            # Filter and prepare data
-            df_bs = df_financial[df_financial['statement_type'] == 'balance_sheet'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
-            
-            if not df_bs.empty and len(df_bs) > 0:
+            if len(df_bs) > 0:
                 col1, col2 = st.columns(2)
                 
                 with col1:
@@ -443,332 +490,55 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
                             )
                             fig2.update_layout(height=500, showlegend=True)
                             st.plotly_chart(fig2, use_container_width=True)
-                    else:
-                        pie_data = df_bs.nlargest(10, 'current_year')
-                        fig2 = px.pie(
-                            pie_data,
-                            values='current_year',
-                            names='line_item',
-                            hole=0.4
-                        )
-                        fig2.update_traces(
-                            texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
-                            textposition='inside',
-                            hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
-                        )
-                        fig2.update_layout(height=500, showlegend=False)
-                        st.plotly_chart(fig2, use_container_width=True)
-                
-                # Year-over-year comparison
-                if 'previous_year' in df_bs.columns and df_bs['previous_year'].sum() > 0:
-                    st.markdown("---")
-                    st.markdown("#### 🔑 Key Financial Metrics Comparison")
-                    
-                    # Calculate totals by category for comparison
-                    if 'category' in df_bs.columns:
-                        metrics_comparison = []
-                        
-                        # Assets
-                        assets_current = df_bs[df_bs['category'] == 'Assets']['current_year'].sum()
-                        assets_previous = df_bs[df_bs['category'] == 'Assets']['previous_year'].sum()
-                        if assets_current > 0 or assets_previous > 0:
-                            metrics_comparison.append({
-                                'Metric': 'Total Assets',
-                                'Previous Year': assets_previous,
-                                'Current Year': assets_current,
-                                'Change': assets_current - assets_previous,
-                                'Change %': ((assets_current - assets_previous) / assets_previous * 100) if assets_previous > 0 else 0
-                            })
-                        
-                        # Liabilities
-                        liabilities_current = df_bs[df_bs['category'] == 'Liabilities']['current_year'].sum()
-                        liabilities_previous = df_bs[df_bs['category'] == 'Liabilities']['previous_year'].sum()
-                        if liabilities_current > 0 or liabilities_previous > 0:
-                            metrics_comparison.append({
-                                'Metric': 'Total Liabilities',
-                                'Previous Year': liabilities_previous,
-                                'Current Year': liabilities_current,
-                                'Change': liabilities_current - liabilities_previous,
-                                'Change %': ((liabilities_current - liabilities_previous) / liabilities_previous * 100) if liabilities_previous > 0 else 0
-                            })
-                        
-                        # Equity
-                        equity_current = df_bs[df_bs['category'] == 'Equity']['current_year'].sum()
-                        equity_previous = df_bs[df_bs['category'] == 'Equity']['previous_year'].sum()
-                        if equity_current > 0 or equity_previous > 0:
-                            metrics_comparison.append({
-                                'Metric': 'Total Equity',
-                                'Previous Year': equity_previous,
-                                'Current Year': equity_current,
-                                'Change': equity_current - equity_previous,
-                                'Change %': ((equity_current - equity_previous) / equity_previous * 100) if equity_previous > 0 else 0
-                            })
-                        
-                        if metrics_comparison:
-                            df_metrics = pd.DataFrame(metrics_comparison)
-                            
-                            # Visualization
-                            col1, col2 = st.columns([2, 1])
-                            
-                            with col1:
-                                fig_metrics = go.Figure()
-                                fig_metrics.add_trace(go.Bar(
-                                    name='Previous Year',
-                                    x=df_metrics['Metric'],
-                                    y=df_metrics['Previous Year'],
-                                    text=[f'{currency_symbol}{v:,.0f}' for v in df_metrics['Previous Year']],
-                                    textposition='outside',
-                                    marker_color='lightcoral',
-                                    hovertemplate='<b>%{x}</b><br>Previous Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
-                                ))
-                                fig_metrics.add_trace(go.Bar(
-                                    name='Current Year',
-                                    x=df_metrics['Metric'],
-                                    y=df_metrics['Current Year'],
-                                    text=[f'{currency_symbol}{v:,.0f}' for v in df_metrics['Current Year']],
-                                    textposition='outside',
-                                    marker_color='steelblue',
-                                    hovertemplate='<b>%{x}</b><br>Current Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
-                                ))
-                                fig_metrics.update_layout(
-                                    barmode='group',
-                                    xaxis_title='',
-                                    yaxis_title=f'Amount ({currency_symbol})',
-                                    height=400,
-                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                    yaxis=dict(tickformat=',.0f')
-                                )
-                                st.plotly_chart(fig_metrics, use_container_width=True)
-                            
-                            with col2:
-                                # Table with changes
-                                display_df = df_metrics.copy()
-                                display_df['Previous Year'] = display_df['Previous Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Current Year'] = display_df['Current Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Change'] = display_df['Change'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Change %'] = display_df['Change %'].apply(lambda x: f'{x:+.2f}%')
-                                
-                                st.markdown("##### Changes")
-                                st.dataframe(display_df[['Metric', 'Change', 'Change %']], use_container_width=True, hide_index=True)
-                    
-                    # Detailed item comparison
-                    st.markdown("---")
-                    st.markdown("#### 📊 Top Items Year-over-Year")
-                    
-                    top_items_yoy = df_bs.nlargest(10, 'current_year')[['line_item', 'current_year', 'previous_year', 'category']].copy() if 'category' in df_bs.columns else df_bs.nlargest(10, 'current_year')[['line_item', 'current_year', 'previous_year']].copy()
-                    top_items_yoy['change'] = top_items_yoy['current_year'] - top_items_yoy['previous_year']
-                    top_items_yoy['change_pct'] = ((top_items_yoy['current_year'] - top_items_yoy['previous_year']) / top_items_yoy['previous_year'] * 100).replace([np.inf, -np.inf], 0).fillna(0)
-                    
-                    fig3 = go.Figure()
-                    fig3.add_trace(go.Bar(
-                        name='Previous Year',
-                        x=top_items_yoy['line_item'],
-                        y=top_items_yoy['previous_year'],
-                        text=[f'{currency_symbol}{v:,.0f}' for v in top_items_yoy['previous_year']],
-                        textposition='outside',
-                        marker_color='lightblue'
-                    ))
-                    fig3.add_trace(go.Bar(
-                        name='Current Year',
-                        x=top_items_yoy['line_item'],
-                        y=top_items_yoy['current_year'],
-                        text=[f'{currency_symbol}{v:,.0f}' for v in top_items_yoy['current_year']],
-                        textposition='outside',
-                        marker_color='darkblue'
-                    ))
-                    fig3.update_layout(
-                        barmode='group',
-                        xaxis_title='Item',
-                        yaxis_title=f'Amount ({currency_symbol})',
-                        height=450,
-                        xaxis={'tickangle': -45},
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                    )
-                    st.plotly_chart(fig3, use_container_width=True)
-                
-                # Summary Statistics
-                st.markdown("---")
-                st.markdown("### 📋 Summary Statistics")
-                
-                stats_df = pd.DataFrame({
-                    'Metric': ['Total Items', 'Current Year Total', 'Previous Year Total', 'Highest Value', 'Lowest Value'],
-                    'Value': [
-                        f"{len(df_bs):,}",
-                        f"{currency_symbol}{df_bs['current_year'].sum():,.2f}",
-                        f"{currency_symbol}{df_bs['previous_year'].sum():,.2f}" if 'previous_year' in df_bs.columns else 'Not Available',
-                        f"{currency_symbol}{df_bs['current_year'].max():,.2f}",
-                        f"{currency_symbol}{df_bs['current_year'].min():,.2f}"
-                    ]
-                })
-                st.dataframe(stats_df, use_container_width=True, hide_index=True)
     
     elif doc_type in ['p&l_statement', 'pl_statement']:
-        metrics = groq_data.get('financial_metrics', {})
-        col1, col2, col3, col4 = st.columns(4)
+        # Extract totals from P&L items
+        df_pl = df_financial[df_financial['statement_type'] == 'pl_statement'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
         
-        with col1:
-            revenue = metrics.get('revenue') or metrics.get('total_income')
-            if revenue:
-                st.metric("Revenue", f"{currency_symbol}{revenue:,.2f}")
-        with col2:
-            expenses = metrics.get('total_expenses')
-            if expenses:
-                st.metric("Total Expenses", f"{currency_symbol}{expenses:,.2f}")
-        with col3:
-            net_income = metrics.get('net_income')
-            if net_income:
-                st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
-        with col4:
-            profit_margin = metrics.get('profit_margin')
-            if profit_margin:
-                st.metric("Profit Margin", f"{profit_margin:.2f}%")
-        
-        # P&L Visualization
-        if not df_financial.empty and 'current_year' in df_financial.columns:
-            st.markdown("---")
-            st.markdown("### 📈 P&L Analysis")
+        if not df_pl.empty and 'category' in df_pl.columns:
+            income_current = df_pl[df_pl['category'] == 'Revenue']['current_year'].sum()
+            income_previous = df_pl[df_pl['category'] == 'Revenue']['previous_year'].sum() if 'previous_year' in df_pl.columns else 0
             
-            df_pl = df_financial[df_financial['statement_type'] == 'pl_statement'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
+            expenses_current = df_pl[df_pl['category'] == 'Expenses']['current_year'].sum()
+            expenses_previous = df_pl[df_pl['category'] == 'Expenses']['previous_year'].sum() if 'previous_year' in df_pl.columns else 0
             
-            if not df_pl.empty and len(df_pl) > 0:
-                # Year-over-year comparison first
-                if 'previous_year' in df_pl.columns and df_pl['previous_year'].sum() > 0:
-                    st.markdown("#### 🔑 Key P&L Metrics Comparison")
-                    
-                    if 'category' in df_pl.columns:
-                        metrics_comparison = []
-                        
-                        # Revenue/Income
-                        revenue_current = df_pl[df_pl['category'] == 'Revenue']['current_year'].sum()
-                        revenue_previous = df_pl[df_pl['category'] == 'Revenue']['previous_year'].sum()
-                        if revenue_current > 0 or revenue_previous > 0:
-                            metrics_comparison.append({
-                                'Metric': 'Total Income',
-                                'Previous Year': revenue_previous,
-                                'Current Year': revenue_current,
-                                'Change': revenue_current - revenue_previous,
-                                'Change %': ((revenue_current - revenue_previous) / revenue_previous * 100) if revenue_previous > 0 else 0
-                            })
-                        
-                        # Expenses
-                        expenses_current = df_pl[df_pl['category'] == 'Expenses']['current_year'].sum()
-                        expenses_previous = df_pl[df_pl['category'] == 'Expenses']['previous_year'].sum()
-                        if expenses_current > 0 or expenses_previous > 0:
-                            metrics_comparison.append({
-                                'Metric': 'Total Expenses',
-                                'Previous Year': expenses_previous,
-                                'Current Year': expenses_current,
-                                'Change': expenses_current - expenses_previous,
-                                'Change %': ((expenses_current - expenses_previous) / expenses_previous * 100) if expenses_previous > 0 else 0
-                            })
-                        
-                        # Net Income
-                        net_current = revenue_current - expenses_current
-                        net_previous = revenue_previous - expenses_previous
-                        if net_current != 0 or net_previous != 0:
-                            metrics_comparison.append({
-                                'Metric': 'Net Income',
-                                'Previous Year': net_previous,
-                                'Current Year': net_current,
-                                'Change': net_current - net_previous,
-                                'Change %': ((net_current - net_previous) / net_previous * 100) if net_previous != 0 else 0
-                            })
-                        
-                        if metrics_comparison:
-                            df_metrics = pd.DataFrame(metrics_comparison)
-                            
-                            col1, col2 = st.columns([2, 1])
-                            
-                            with col1:
-                                fig_metrics = go.Figure()
-                                fig_metrics.add_trace(go.Bar(
-                                    name='Previous Year',
-                                    x=df_metrics['Metric'],
-                                    y=df_metrics['Previous Year'],
-                                    text=[f'{currency_symbol}{v:,.0f}' for v in df_metrics['Previous Year']],
-                                    textposition='outside',
-                                    marker_color='lightcoral',
-                                    hovertemplate='<b>%{x}</b><br>Previous Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
-                                ))
-                                fig_metrics.add_trace(go.Bar(
-                                    name='Current Year',
-                                    x=df_metrics['Metric'],
-                                    y=df_metrics['Current Year'],
-                                    text=[f'{currency_symbol}{v:,.0f}' for v in df_metrics['Current Year']],
-                                    textposition='outside',
-                                    marker_color='steelblue',
-                                    hovertemplate='<b>%{x}</b><br>Current Year: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
-                                ))
-                                fig_metrics.update_layout(
-                                    barmode='group',
-                                    xaxis_title='',
-                                    yaxis_title=f'Amount ({currency_symbol})',
-                                    height=400,
-                                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                    yaxis=dict(tickformat=',.0f')
-                                )
-                                st.plotly_chart(fig_metrics, use_container_width=True)
-                            
-                            with col2:
-                                display_df = df_metrics.copy()
-                                display_df['Previous Year'] = display_df['Previous Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Current Year'] = display_df['Current Year'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Change'] = display_df['Change'].apply(lambda x: f'{currency_symbol}{x:,.2f}')
-                                display_df['Change %'] = display_df['Change %'].apply(lambda x: f'{x:+.2f}%')
-                                
-                                st.markdown("##### Changes")
-                                st.dataframe(display_df[['Metric', 'Change', 'Change %']], use_container_width=True, hide_index=True)
-                    
-                    st.markdown("---")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("#### Revenue vs Expenses (Current Year)")
-                    
-                    if 'category' in df_pl.columns:
-                        category_totals = df_pl.groupby('category')['current_year'].sum().reset_index()
-                        
-                        fig1 = px.bar(
-                            category_totals,
-                            x='category',
-                            y='current_year',
-                            labels={'current_year': f'Amount ({currency_symbol})', 'category': 'Category'},
-                            color='category',
-                            color_discrete_map={'Revenue': 'green', 'Expenses': 'red'}
-                        )
-                        fig1.update_traces(
-                            texttemplate=f'{currency_symbol}%{{y:,.0f}}',
-                            textposition='outside'
-                        )
-                        fig1.update_layout(height=400, showlegend=False)
-                        st.plotly_chart(fig1, use_container_width=True)
-                
-                with col2:
-                    st.markdown("#### Expense Breakdown")
-                    
-                    expenses_df = df_pl[df_pl['category'] == 'Expenses'].copy() if 'category' in df_pl.columns else df_pl.copy()
-                    
-                    if not expenses_df.empty:
-                        top_expenses = expenses_df.nlargest(8, 'current_year')
-                        
-                        fig2 = px.pie(
-                            top_expenses,
-                            values='current_year',
-                            names='line_item',
-                            hole=0.4
-                        )
-                        fig2.update_traces(
-                            texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
-                            textposition='inside'
-                        )
-                        fig2.update_layout(height=400, showlegend=False)
-                        st.plotly_chart(fig2, use_container_width=True)
+            net_current = income_current - expenses_current
+            net_previous = income_previous - expenses_previous
+            
+            st.markdown("#### Key P&L Metrics Comparison")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if income_current > 0:
+                    delta = income_current - income_previous if income_previous > 0 else None
+                    delta_pct = f"{((income_current - income_previous) / income_previous * 100):+.1f}%" if income_previous > 0 else None
+                    st.metric("Total Income (Current)", f"{currency_symbol}{income_current:,.2f}",
+                             delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                    if income_previous > 0:
+                        st.caption(f"Previous: {currency_symbol}{income_previous:,.2f}")
+            
+            with col2:
+                if expenses_current > 0:
+                    delta = expenses_current - expenses_previous if expenses_previous > 0 else None
+                    delta_pct = f"{((expenses_current - expenses_previous) / expenses_previous * 100):+.1f}%" if expenses_previous > 0 else None
+                    st.metric("Total Expenses (Current)", f"{currency_symbol}{expenses_current:,.2f}",
+                             delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                    if expenses_previous > 0:
+                        st.caption(f"Previous: {currency_symbol}{expenses_previous:,.2f}")
+            
+            with col3:
+                delta = net_current - net_previous if net_previous != 0 else None
+                delta_pct = f"{((net_current - net_previous) / net_previous * 100):+.1f}%" if net_previous != 0 else None
+                st.metric("Net Income (Current)", f"{currency_symbol}{net_current:,.2f}",
+                         delta=f"{currency_symbol}{delta:,.2f} ({delta_pct})" if delta is not None else None)
+                if net_previous != 0:
+                    st.caption(f"Previous: {currency_symbol}{net_previous:,.2f}")
     
     else:
-        # Invoice/Receipt visualization
+        # Invoice/Receipt visualization with ALL tax components
         amounts = groq_data.get('amounts', {})
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         # Calculate from line items if amounts not available
         calc_subtotal = 0
@@ -784,197 +554,109 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
                 calc_total = df_items['amount'].sum()
         
         with col1:
-            subtotal = amounts.get('subtotal') if amounts.get('subtotal') else calc_subtotal
-            if subtotal:
-                st.metric("Untaxed Amount", f"{currency_symbol}{subtotal:,.2f}")
+            taxable_value = amounts.get('taxable_value') or amounts.get('subtotal') or calc_subtotal
+            if taxable_value:
+                st.metric("Taxable Value", f"{currency_symbol}{taxable_value:,.2f}")
+        
         with col2:
-            tax = amounts.get('tax') if amounts.get('tax') else calc_tax
-            if tax:
-                st.metric("Tax Amount", f"{currency_symbol}{tax:,.2f}")
+            cgst = amounts.get('cgst')
+            if cgst:
+                st.metric("CGST", f"{currency_symbol}{cgst:,.2f}")
+        
         with col3:
-            total = amounts.get('total') if amounts.get('total') else calc_total
+            sgst = amounts.get('sgst')
+            if sgst:
+                st.metric("SGST", f"{currency_symbol}{sgst:,.2f}")
+        
+        with col4:
+            total_tax = amounts.get('total_tax') or amounts.get('tax') or calc_tax
+            if total_tax:
+                st.metric("Total Tax", f"{currency_symbol}{total_tax:,.2f}")
+        
+        with col5:
+            total = amounts.get('total') or calc_total
             if total:
                 st.metric("Total Amount", f"{currency_symbol}{total:,.2f}")
-        with col4:
-            balance = amounts.get('balance')
-            if balance:
-                st.metric("Balance Due", f"{currency_symbol}{balance:,.2f}")
+        
+        # Display tax breakdown table
+        if cgst or sgst or amounts.get('igst'):
+            st.markdown("---")
+            st.markdown("### 📋 Tax Breakdown")
+            
+            tax_data = []
+            if cgst:
+                tax_data.append({"Tax Component": "CGST", "Amount": f"{currency_symbol}{cgst:,.2f}"})
+            if sgst:
+                tax_data.append({"Tax Component": "SGST", "Amount": f"{currency_symbol}{sgst:,.2f}"})
+            if amounts.get('igst'):
+                tax_data.append({"Tax Component": "IGST", "Amount": f"{currency_symbol}{amounts.get('igst'):,.2f}"})
+            if total_tax:
+                tax_data.append({"Tax Component": "Total Tax", "Amount": f"{currency_symbol}{total_tax:,.2f}"})
+            
+            if tax_data:
+                st.dataframe(pd.DataFrame(tax_data), use_container_width=True, hide_index=True)
         
         # Role-based grouping for invoices
         if not df_items.empty and 'role' in df_items.columns and df_items['role'].notna().any():
             st.markdown("---")
             st.markdown("### 👥 Analysis by Role/Category")
             
-            # Group by role
-            role_summary = df_items.groupby('role').agg({
-                'amount': 'sum',
-                'untaxed_amount': 'sum',
-                'tax_amount': 'sum',
-                'quantity': 'sum'
-            }).reset_index()
+            # Filter out null/None roles and group
+            df_items_with_role = df_items[df_items['role'].notna() & (df_items['role'] != 'Other') & (df_items['role'] != '')].copy()
             
-            role_summary = role_summary[role_summary['amount'] > 0].sort_values('amount', ascending=False)
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### Amount by Role")
-                fig1 = px.bar(
-                    role_summary,
-                    x='role',
-                    y='amount',
-                    text='amount',
-                    labels={'amount': f'Total Amount ({currency_symbol})', 'role': 'Role'},
-                    color='role',
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                fig1.update_traces(
-                    texttemplate=f'{currency_symbol}%{{y:,.2f}}',
-                    textposition='outside',
-                    hovertemplate='<b>%{x}</b><br>Total: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
-                )
-                fig1.update_layout(
-                    height=400,
-                    showlegend=False,
-                    xaxis_title='Role',
-                    yaxis_title=f'Amount ({currency_symbol})',
-                    xaxis={'tickangle': -45}
-                )
-                st.plotly_chart(fig1, use_container_width=True)
-            
-            with col2:
-                st.markdown("#### Role Distribution")
-                fig2 = px.pie(
-                    role_summary,
-                    values='amount',
-                    names='role',
-                    hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Set3
-                )
-                fig2.update_traces(
-                    texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}<br>%{{percent}}',
-                    textposition='inside',
-                    hovertemplate='<b>%{label}</b><br>Amount: ' + f'{currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
-                )
-                fig2.update_layout(height=400)
-                st.plotly_chart(fig2, use_container_width=True)
-            
-            # Detailed breakdown by role
-            st.markdown("#### 📋 Breakdown by Role")
-            
-            # Create detailed summary table
-            role_detail = df_items.groupby('role').agg({
-                'description': 'count',
-                'untaxed_amount': 'sum',
-                'tax_amount': 'sum',
-                'amount': 'sum'
-            }).reset_index()
-            
-            role_detail.columns = ['Role', 'Item Count', 'Untaxed Amount', 'Tax Amount', 'Total Amount']
-            
-            # Format amounts
-            for col in ['Untaxed Amount', 'Tax Amount', 'Total Amount']:
-                role_detail[col] = role_detail[col].apply(lambda x: f"{currency_symbol}{x:,.2f}")
-            
-            st.dataframe(role_detail, use_container_width=True, hide_index=True)
-            
-            # Untaxed vs Taxed comparison
-            st.markdown("---")
-            st.markdown("#### 💰 Untaxed vs Tax Amount by Role")
-            
-            fig3 = go.Figure()
-            fig3.add_trace(go.Bar(
-                name='Untaxed Amount',
-                x=role_summary['role'],
-                y=role_summary['untaxed_amount'],
-                text=[f'{currency_symbol}{v:,.2f}' for v in role_summary['untaxed_amount']],
-                textposition='outside',
-                marker_color='lightblue'
-            ))
-            fig3.add_trace(go.Bar(
-                name='Tax Amount',
-                x=role_summary['role'],
-                y=role_summary['tax_amount'],
-                text=[f'{currency_symbol}{v:,.2f}' for v in role_summary['tax_amount']],
-                textposition='outside',
-                marker_color='coral'
-            ))
-            fig3.update_layout(
-                barmode='group',
-                xaxis_title='Role',
-                yaxis_title=f'Amount ({currency_symbol})',
-                height=400,
-                xaxis={'tickangle': -45},
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig3, use_container_width=True)
-        
-        # Charts for invoices
-        if not df_items.empty and 'amount' in df_items.columns and 'description' in df_items.columns:
-            st.markdown("---")
-            st.markdown("### 📈 Item-wise Analysis")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("#### Top 10 Items by Value")
-                top_items = df_items.nlargest(10, 'amount')
+            if not df_items_with_role.empty:
+                role_summary = df_items_with_role.groupby('role').agg({
+                    'amount': 'sum',
+                    'untaxed_amount': 'sum',
+                    'tax_amount': 'sum',
+                    'quantity': 'sum'
+                }).reset_index()
                 
-                fig4 = px.bar(
-                    top_items,
-                    x='amount',
-                    y='description',
-                    orientation='h',
-                    labels={'amount': f'Amount ({currency_symbol})', 'description': 'Item'},
-                    color='role' if 'role' in top_items.columns else None
-                )
-                fig4.update_traces(
-                    texttemplate=f'{currency_symbol}%{{x:,.2f}}',
-                    textposition='outside',
-                    hovertemplate=f'<b>%{{y}}</b><br>Amount: {currency_symbol}%{{x:,.2f}}<extra></extra>'
-                )
-                fig4.update_layout(
-                    yaxis={'categoryorder': 'total ascending'},
-                    xaxis=dict(tickformat=',.2f'),
-                    height=400
-                )
-                st.plotly_chart(fig4, use_container_width=True)
-            
-            with col2:
-                st.markdown("#### Top Items Distribution")
-                pie_data = df_items.nlargest(8, 'amount')
+                role_summary = role_summary[role_summary['amount'] > 0].sort_values('amount', ascending=False)
                 
-                fig5 = px.pie(
-                    pie_data,
-                    values='amount',
-                    names='description',
-                    hole=0.4
-                )
-                fig5.update_traces(
-                    texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
-                    textposition='inside',
-                    hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
-                )
-                fig5.update_layout(height=400, showlegend=False)
-                st.plotly_chart(fig5, use_container_width=True)
-            
-            # Summary Statistics
-            st.markdown("---")
-            st.markdown("### 📋 Summary Statistics")
-            
-            stats_df = pd.DataFrame({
-                'Metric': ['Total Items', 'Untaxed Amount', 'Tax Amount', 'Total Amount', 'Average Amount', 'Highest Amount', 'Lowest Amount'],
-                'Value': [
-                    f"{len(df_items):,}",
-                    f"{currency_symbol}{calc_subtotal:,.2f}",
-                    f"{currency_symbol}{calc_tax:,.2f}",
-                    f"{currency_symbol}{calc_total:,.2f}",
-                    f"{currency_symbol}{df_items['amount'].mean():,.2f}",
-                    f"{currency_symbol}{df_items['amount'].max():,.2f}",
-                    f"{currency_symbol}{df_items['amount'].min():,.2f}"
-                ]
-            })
-            st.dataframe(stats_df, use_container_width=True, hide_index=True)
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Amount by Role")
+                    fig1 = px.bar(
+                        role_summary,
+                        x='role',
+                        y='amount',
+                        text='amount',
+                        labels={'amount': f'Total Amount ({currency_symbol})', 'role': 'Role'},
+                        color='role',
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    fig1.update_traces(
+                        texttemplate=f'{currency_symbol}%{{y:,.2f}}',
+                        textposition='outside',
+                        hovertemplate='<b>%{x}</b><br>Total: ' + f'{currency_symbol}%{{y:,.2f}}<extra></extra>'
+                    )
+                    fig1.update_layout(
+                        height=400,
+                        showlegend=False,
+                        xaxis_title='Role',
+                        yaxis_title=f'Amount ({currency_symbol})',
+                        xaxis={'tickangle': -45}
+                    )
+                    st.plotly_chart(fig1, use_container_width=True)
+                
+                with col2:
+                    st.markdown("#### Role Distribution")
+                    fig2 = px.pie(
+                        role_summary,
+                        values='amount',
+                        names='role',
+                        hole=0.4,
+                        color_discrete_sequence=px.colors.qualitative.Set3
+                    )
+                    fig2.update_traces(
+                        texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}<br>%{{percent}}',
+                        textposition='inside',
+                        hovertemplate='<b>%{label}</b><br>Amount: ' + f'{currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
+                    )
+                    fig2.update_layout(height=400)
+                    st.plotly_chart(fig2, use_container_width=True)
 
 # -------------------------
 # Login Page
@@ -982,11 +664,9 @@ def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.Dat
 def show_login_page():
     """Display login page with SFW Technologies branding"""
     
-    # Center the login form
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
-        # Display logo centered
         try:
             col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
             with col_logo2:
@@ -999,7 +679,6 @@ def show_login_page():
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # Login form
         st.markdown("<h3 style='text-align: center;'>🔐 Login to Financial Document OCR</h3>", unsafe_allow_html=True)
         st.markdown("---")
         
@@ -1018,7 +697,6 @@ def show_login_page():
                     st.error("❌ Invalid username or password")
                     st.info("💡 Default credentials:\n- Username: **sfw**\n- Password: **admin**")
         
-    # Footer
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666;'>
@@ -1031,11 +709,17 @@ def main():
     """Main entrypoint for the Streamlit app"""
     st.set_page_config(page_title="Universal Financial Document OCR", layout="wide")
     
-    # init session state
+    # Initialize session state
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
     if "username" not in st.session_state:
         st.session_state.username = None
+    if "ocr_text" not in st.session_state:
+        st.session_state.ocr_text = None
+    if "ocr_confidence" not in st.session_state:
+        st.session_state.ocr_confidence = None
+    if "groq_data" not in st.session_state:
+        st.session_state.groq_data = None
     
     # Simple nav: login vs app
     if not st.session_state.logged_in:
@@ -1047,16 +731,23 @@ def main():
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.username = None
+        st.session_state.ocr_text = None
+        st.session_state.ocr_confidence = None
+        st.session_state.groq_data = None
         st.rerun()
     
-    st.title("📥 Upload Financial Document (Invoice / P&L / Balance Sheet)")
+    st.title("📄 Upload Financial Document (Invoice / P&L / Balance Sheet)")
     uploaded = st.file_uploader("Upload PDF / PNG / JPG (max 10MB)", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=False)
     
     if uploaded is None:
         st.info("Upload a document to begin OCR → Structured extraction → Dashboard")
+        # Reset session state when file is removed
+        st.session_state.ocr_text = None
+        st.session_state.ocr_confidence = None
+        st.session_state.groq_data = None
         return
     
-    # size guard
+    # Size guard
     uploaded.seek(0, os.SEEK_END)
     size_mb = uploaded.tell() / (1024 * 1024)
     uploaded.seek(0)
@@ -1064,64 +755,84 @@ def main():
         st.error(f"File too large ({size_mb:.1f} MB). Max allowed: {MAX_FILE_SIZE_MB} MB.")
         return
     
-    # convert to images (if pdf) or load image
-    file_bytes = uploaded.read()
-    file_type = uploaded.type if hasattr(uploaded, "type") else uploaded.name.split('.')[-1].lower()
+    # Check if this is a new file upload
+    file_key = f"{uploaded.name}_{size_mb}"
+    if "last_file_key" not in st.session_state or st.session_state.last_file_key != file_key:
+        # New file uploaded, reset everything
+        st.session_state.ocr_text = None
+        st.session_state.ocr_confidence = None
+        st.session_state.groq_data = None
+        st.session_state.last_file_key = file_key
     
-    images = []
-    if uploaded.name.lower().endswith('.pdf'):
-        images = pdf_to_images(file_bytes, max_pages=10)
-        if not images:
-            st.error("Failed to convert PDF pages to images.")
-            return
-    else:
-        try:
-            pil_img = Image.open(io.BytesIO(file_bytes))
-            images = [pil_img.convert('RGB')]
-        except Exception as e:
-            st.error(f"Failed to read image file: {e}")
-            return
-    
-    # Initialize Vision client
-    vision_client = get_vision_client()
-    if vision_client is None:
-        st.error("Vision API client could not be initialized. Check credentials.")
-        return
-    
-    # OCR each page and concatenate text
-    full_texts = []
-    confidences = []
-    words_all = []
-    with st.spinner("Running OCR (Google Vision API)..."):
-        for i, img in enumerate(images):
+    # Run OCR only if not already done
+    if st.session_state.ocr_text is None:
+        # Convert to images (if pdf) or load image
+        file_bytes = uploaded.read()
+        
+        images = []
+        if uploaded.name.lower().endswith('.pdf'):
+            images = pdf_to_images(file_bytes, max_pages=10)
+            if not images:
+                st.error("Failed to convert PDF pages to images.")
+                return
+        else:
             try:
-                img_bytes = prepare_image_for_vision(img)
-                ocr_result = extract_text_vision_api(img_bytes, vision_client)
-                if 'error' in ocr_result:
-                    st.error(f"OCR error on page {i+1}: {ocr_result['error']}")
-                else:
-                    full_texts.append(ocr_result.get('full_text', ''))
-                    confidences.append(ocr_result.get('avg_confidence', 0))
-                    words_all.extend(ocr_result.get('words', []))
+                pil_img = Image.open(io.BytesIO(file_bytes))
+                images = [pil_img.convert('RGB')]
             except Exception as e:
-                st.error(f"Unexpected OCR failure on page {i+1}: {e}")
+                st.error(f"Failed to read image file: {e}")
+                return
+        
+        # Initialize Vision client
+        vision_client = get_vision_client()
+        if vision_client is None:
+            st.error("Vision API client could not be initialized. Check credentials.")
+            return
+        
+        # OCR each page and concatenate text
+        full_texts = []
+        confidences = []
+        with st.spinner("Running OCR..."):
+            for i, img in enumerate(images):
+                try:
+                    img_bytes = prepare_image_for_vision(img)
+                    ocr_result = extract_text_vision_api(img_bytes, vision_client)
+                    if 'error' in ocr_result:
+                        st.error(f"OCR error on page {i+1}: {ocr_result['error']}")
+                    else:
+                        full_texts.append(ocr_result.get('full_text', ''))
+                        confidences.append(ocr_result.get('avg_confidence', 0))
+                except Exception as e:
+                    st.error(f"Unexpected OCR failure on page {i+1}: {e}")
+        
+        combined_text = "\n\n".join([t for t in full_texts if t])
+        avg_conf = float(np.mean(confidences)) if confidences else 0.0
+        
+        # Store in session state
+        st.session_state.ocr_text = combined_text
+        st.session_state.ocr_confidence = avg_conf
     
-    combined_text = "\n\n".join([t for t in full_texts if t])
-    avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    # Display OCR results
+    st.markdown(f"**OCR Average Confidence:** {st.session_state.ocr_confidence:.2f}")
+    st.expander("📄 Show OCR text", expanded=False).text(st.session_state.ocr_text[:20000] or "No text recognized")
     
-    st.markdown(f"**OCR Average Confidence:** {avg_conf:.2f}")
-    st.expander("🔍 Show OCR text", expanded=False).write(combined_text[:20000] or "No text recognized")
-    
-    # Ask user to continue with Groq extraction
-    if st.button("Extract structured financial data (Groq)"):
-        with st.spinner("Extracting structured data with Groq AI..."):
-            groq_data = extract_financial_data_with_groq(combined_text)
+    # Extract structured data button
+    if st.button("Extract Structured Financial Data", type="primary"):
+        with st.spinner("Extracting structured data AI..."):
+            groq_data = extract_financial_data_with_groq(st.session_state.ocr_text)
         
         if groq_data is None:
             st.error("Extraction failed or returned no data.")
             return
         
-        # Show raw JSON and create dataframes
+        # Store in session state
+        st.session_state.groq_data = groq_data
+    
+    # Display results if available
+    if st.session_state.groq_data:
+        groq_data = st.session_state.groq_data
+        
+        # Show raw JSON
         st.subheader("Extracted JSON")
         st.json(groq_data)
         
@@ -1131,15 +842,15 @@ def main():
         show_dashboard(groq_data, df_items, df_financial, df_summary)
         
         # Data exports
-        with st.expander("Download extracted tables"):
+        with st.expander("📥 Download Extracted Tables"):
             if not df_items.empty:
                 csv_items = df_items.to_csv(index=False).encode('utf-8')
-                st.download_button("Download line items CSV", data=csv_items, file_name="line_items.csv", mime="text/csv")
+                st.download_button("Download Line Items CSV", data=csv_items, file_name="line_items.csv", mime="text/csv")
             if not df_financial.empty:
                 csv_fin = df_financial.to_csv(index=False).encode('utf-8')
-                st.download_button("Download financials CSV", data=csv_fin, file_name="financials.csv", mime="text/csv")
+                st.download_button("Download Financials CSV", data=csv_fin, file_name="financials.csv", mime="text/csv")
             csv_summary = df_summary.to_csv(index=False).encode('utf-8')
-            st.download_button("Download summary CSV", data=csv_summary, file_name="summary.csv", mime="text/csv")
+            st.download_button("Download Summary CSV", data=csv_summary, file_name="summary.csv", mime="text/csv")
 
 
 if __name__ == "__main__":
