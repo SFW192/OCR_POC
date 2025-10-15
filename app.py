@@ -1,3 +1,4 @@
+
 # streamlit_app.py
 """
 Universal Financial Document OCR using Google Cloud Vision API + Groq AI
@@ -132,6 +133,10 @@ def extract_financial_data_with_groq(text: str) -> Dict:
 Document Text:
 {text[:8000]}
 
+For Balance Sheet or Financial Statement documents, extract ALL major categories with their values.
+For P&L Statements, extract all revenue and expense line items.
+For Invoices/Receipts, extract line items.
+
 Return JSON with this structure (use null for missing data):
 {{
     "document_type": "invoice|receipt|p&l_statement|balance_sheet|financial_statement|other",
@@ -158,11 +163,32 @@ Return JSON with this structure (use null for missing data):
             "amount": number
         }}
     ],
+    "balance_sheet_items": [
+        {{
+            "category": "Assets|Liabilities|Equity",
+            "subcategory": "Current Assets|Non-Current Assets|etc",
+            "line_item": "specific item name",
+            "current_year": number,
+            "previous_year": number_or_null
+        }}
+    ],
+    "pl_statement_items": [
+        {{
+            "category": "Revenue|Expenses",
+            "line_item": "specific item name",
+            "current_year": number,
+            "previous_year": number_or_null
+        }}
+    ],
     "financial_metrics": {{
         "revenue": number_or_null,
-        "expenses": number_or_null,
+        "total_income": number_or_null,
+        "total_expenses": number_or_null,
         "net_income": number_or_null,
-        "profit_margin": number_or_null
+        "profit_margin": number_or_null,
+        "total_assets": number_or_null,
+        "total_liabilities": number_or_null,
+        "total_equity": number_or_null
     }},
     "payment_info": {{
         "payment_method": "string or null",
@@ -171,6 +197,12 @@ Return JSON with this structure (use null for missing data):
     }},
     "notes": "additional info"
 }}
+
+IMPORTANT: 
+- For balance sheets, populate balance_sheet_items with ALL major line items
+- For P&L statements, populate pl_statement_items with ALL revenue and expense items
+- Extract actual numerical values from the document
+- Use null only when data is truly missing
 
 Return ONLY valid JSON, no explanations."""
 
@@ -200,32 +232,34 @@ Return ONLY valid JSON, no explanations."""
 # -------------------------
 # Utility Functions
 # -------------------------
-def safe_format_amount(value, currency_symbol='₹', default='N/A'):
+def safe_format_amount(value, currency_symbol='₹'):
     """Safely format amounts"""
     if value is None or (isinstance(value, float) and np.isnan(value)):
-        return default
+        return None
     try:
         return f"{currency_symbol}{float(value):,.2f}"
     except:
-        return default
+        return None
 
-def safe_get(data, key, default='N/A'):
+def safe_get(data, key, default=None):
     """Safely get dictionary value"""
     value = data.get(key)
-    return value if value not in (None, '', 'null') else default
+    if value in (None, '', 'null'):
+        return default
+    return value
 
 # -------------------------
 # DataFrame Creation
 # -------------------------
-def create_dataframes(groq_data: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def create_dataframes(groq_data: Dict) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Create DataFrames from extracted data"""
     
-    # Line items DataFrame
+    # Line items DataFrame (for invoices/receipts)
     line_items = groq_data.get('line_items', [])
     if line_items:
         df_items = pd.DataFrame(line_items)
-        df_items['document_type'] = groq_data.get('document_type', 'unknown')
-        df_items['vendor_name'] = groq_data.get('vendor_name', 'Unknown')
+        df_items['document_type'] = groq_data.get('document_type')
+        df_items['vendor_name'] = groq_data.get('vendor_name')
         df_items['document_date'] = groq_data.get('document_date')
         df_items['currency'] = groq_data.get('currency', 'INR')
         
@@ -235,128 +269,397 @@ def create_dataframes(groq_data: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     else:
         df_items = pd.DataFrame()
     
+    # Balance sheet DataFrame
+    balance_sheet_items = groq_data.get('balance_sheet_items', [])
+    if balance_sheet_items:
+        df_balance = pd.DataFrame(balance_sheet_items)
+        for col in ['current_year', 'previous_year']:
+            if col in df_balance.columns:
+                df_balance[col] = pd.to_numeric(df_balance[col], errors='coerce').fillna(0)
+    else:
+        df_balance = pd.DataFrame()
+    
+    # P&L statement DataFrame
+    pl_items = groq_data.get('pl_statement_items', [])
+    if pl_items:
+        df_pl = pd.DataFrame(pl_items)
+        for col in ['current_year', 'previous_year']:
+            if col in df_pl.columns:
+                df_pl[col] = pd.to_numeric(df_pl[col], errors='coerce').fillna(0)
+    else:
+        df_pl = pd.DataFrame()
+    
     # Summary DataFrame
     amounts = groq_data.get('amounts', {})
-    df_summary = pd.DataFrame([{
-        'document_type': groq_data.get('document_type', 'unknown'),
-        'vendor_name': groq_data.get('vendor_name', 'Unknown'),
+    metrics = groq_data.get('financial_metrics', {})
+    
+    summary_data = {
+        'document_type': groq_data.get('document_type'),
+        'vendor_name': groq_data.get('vendor_name'),
         'document_number': groq_data.get('document_number'),
         'document_date': groq_data.get('document_date'),
         'currency': groq_data.get('currency', 'INR'),
-        'subtotal': amounts.get('subtotal', 0),
-        'tax': amounts.get('tax', 0),
-        'discount': amounts.get('discount', 0),
-        'total': amounts.get('total', 0),
-        'paid': amounts.get('paid', 0),
-        'balance': amounts.get('balance', 0)
-    }])
+        'subtotal': amounts.get('subtotal'),
+        'tax': amounts.get('tax'),
+        'discount': amounts.get('discount'),
+        'total': amounts.get('total'),
+        'paid': amounts.get('paid'),
+        'balance': amounts.get('balance'),
+        'revenue': metrics.get('revenue'),
+        'total_income': metrics.get('total_income'),
+        'total_expenses': metrics.get('total_expenses'),
+        'net_income': metrics.get('net_income'),
+        'total_assets': metrics.get('total_assets'),
+        'total_liabilities': metrics.get('total_liabilities'),
+        'total_equity': metrics.get('total_equity')
+    }
     
-    for col in ['subtotal', 'tax', 'discount', 'total', 'paid', 'balance']:
-        if col in df_summary.columns:
-            df_summary[col] = pd.to_numeric(df_summary[col], errors='coerce').fillna(0)
+    df_summary = pd.DataFrame([summary_data])
     
-    return df_items, df_summary
+    for col in df_summary.columns:
+        if col not in ['document_type', 'vendor_name', 'document_number', 'document_date', 'currency']:
+            df_summary[col] = pd.to_numeric(df_summary[col], errors='coerce')
+    
+    # Combine balance sheet and P&L into a unified financial statement dataframe
+    df_financial = pd.DataFrame()
+    if not df_balance.empty:
+        df_financial = df_balance.copy()
+        df_financial['statement_type'] = 'balance_sheet'
+    if not df_pl.empty:
+        df_pl_copy = df_pl.copy()
+        df_pl_copy['statement_type'] = 'pl_statement'
+        if 'subcategory' not in df_pl_copy.columns:
+            df_pl_copy['subcategory'] = None
+        df_financial = pd.concat([df_financial, df_pl_copy], ignore_index=True)
+    
+    return df_items, df_financial, df_summary
 
 # -------------------------
 # Dashboard
 # -------------------------
-def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_summary: pd.DataFrame):
+def show_dashboard(groq_data: Dict, df_items: pd.DataFrame, df_financial: pd.DataFrame, df_summary: pd.DataFrame):
     """Display financial dashboard"""
     
     st.markdown("---")
     st.markdown("## 📊 Financial Analytics Dashboard")
     
     currency = groq_data.get('currency', 'INR')
-    currency_symbol = '₹' if currency == 'INR' else ('$' if currency == 'USD' else currency)
+    currency_symbol = '₹' if currency == 'INR' else ('$' if currency == 'USD' else '€' if currency == 'EUR' else '£' if currency == 'GBP' else currency)
     
-    # Summary Metrics
+    doc_type = groq_data.get('document_type', '').lower()
+    
+    # Summary Metrics based on document type
     st.markdown("### 💰 Financial Summary")
-    amounts = groq_data.get('amounts', {})
-    col1, col2, col3, col4 = st.columns(4)
     
-    with col1:
-        total = amounts.get('total', 0)
-        st.metric("Total Amount", f"{currency_symbol}{total:,.2f}" if total else "N/A")
-    with col2:
-        tax = amounts.get('tax', 0)
-        st.metric("Tax", f"{currency_symbol}{tax:,.2f}" if tax else "N/A")
-    with col3:
-        subtotal = amounts.get('subtotal', 0)
-        st.metric("Subtotal", f"{currency_symbol}{subtotal:,.2f}" if subtotal else "N/A")
-    with col4:
-        balance = amounts.get('balance', 0)
-        st.metric("Balance Due", f"{currency_symbol}{balance:,.2f}" if balance else "N/A")
-    
-    # Charts
-    if not df_items.empty and 'amount' in df_items.columns and 'description' in df_items.columns:
-        st.markdown("---")
-        st.markdown("### 📈 Visual Analysis")
-        
-        col1, col2 = st.columns(2)
+    if doc_type in ['balance_sheet', 'financial_statement']:
+        metrics = groq_data.get('financial_metrics', {})
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.markdown("#### Top 10 Items by Value")
-            top_items = df_items.nlargest(10, 'amount')
-            
-            fig1 = px.bar(
-                top_items,
-                x='amount',
-                y='description',
-                orientation='h',
-                labels={'amount': f'Amount ({currency_symbol})', 'description': 'Item'}
-            )
-            fig1.update_traces(
-                texttemplate=f'{currency_symbol}%{{x:,.2f}}',
-                textposition='outside',
-                hovertemplate=f'<b>%{{y}}</b><br>Amount: {currency_symbol}%{{x:,.2f}}<extra></extra>'
-            )
-            fig1.update_layout(
-                yaxis={'categoryorder': 'total ascending'},
-                xaxis=dict(tickformat=',.2f'),
-                height=400,
-                showlegend=False
-            )
-            st.plotly_chart(fig1, use_container_width=True)
-        
+            total_assets = metrics.get('total_assets')
+            if total_assets:
+                st.metric("Total Assets", f"{currency_symbol}{total_assets:,.2f}")
         with col2:
-            st.markdown("#### Distribution")
-            pie_data = df_items.nlargest(10, 'amount')
+            total_liabilities = metrics.get('total_liabilities')
+            if total_liabilities:
+                st.metric("Total Liabilities", f"{currency_symbol}{total_liabilities:,.2f}")
+        with col3:
+            total_equity = metrics.get('total_equity')
+            if total_equity:
+                st.metric("Total Equity", f"{currency_symbol}{total_equity:,.2f}")
+        with col4:
+            net_income = metrics.get('net_income')
+            if net_income:
+                st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
+        
+        # Balance Sheet Visualization
+        if not df_financial.empty and 'current_year' in df_financial.columns:
+            st.markdown("---")
+            st.markdown("### 📈 Balance Sheet Analysis")
             
-            fig2 = px.pie(
-                pie_data,
-                values='amount',
-                names='description',
-                hole=0.4
-            )
-            fig2.update_traces(
-                texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.2f}}',
-                textposition='inside',
-                hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
-            )
-            fig2.update_layout(height=400, showlegend=False)
-            st.plotly_chart(fig2, use_container_width=True)
+            # Filter and prepare data
+            df_bs = df_financial[df_financial['statement_type'] == 'balance_sheet'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
+            
+            if not df_bs.empty and len(df_bs) > 0:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Top Items by Value (Current Year)")
+                    top_items = df_bs.nlargest(10, 'current_year')
+                    
+                    fig1 = px.bar(
+                        top_items,
+                        x='current_year',
+                        y='line_item',
+                        orientation='h',
+                        labels={'current_year': f'Amount ({currency_symbol})', 'line_item': 'Item'},
+                        color='category' if 'category' in top_items.columns else None
+                    )
+                    fig1.update_traces(
+                        texttemplate=f'{currency_symbol}%{{x:,.0f}}',
+                        textposition='outside',
+                        hovertemplate=f'<b>%{{y}}</b><br>Amount: {currency_symbol}%{{x:,.2f}}<extra></extra>'
+                    )
+                    fig1.update_layout(
+                        yaxis={'categoryorder': 'total ascending'},
+                        xaxis=dict(tickformat=',.0f'),
+                        height=500,
+                        showlegend=True if 'category' in top_items.columns else False
+                    )
+                    st.plotly_chart(fig1, use_container_width=True)
+                
+                with col2:
+                    st.markdown("#### Category Distribution")
+                    
+                    if 'category' in df_bs.columns:
+                        category_totals = df_bs.groupby('category')['current_year'].sum().reset_index()
+                        category_totals = category_totals[category_totals['current_year'] > 0]
+                        
+                        if not category_totals.empty:
+                            fig2 = px.pie(
+                                category_totals,
+                                values='current_year',
+                                names='category',
+                                hole=0.4
+                            )
+                            fig2.update_traces(
+                                texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
+                                textposition='inside',
+                                hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
+                            )
+                            fig2.update_layout(height=500, showlegend=True)
+                            st.plotly_chart(fig2, use_container_width=True)
+                    else:
+                        pie_data = df_bs.nlargest(10, 'current_year')
+                        fig2 = px.pie(
+                            pie_data,
+                            values='current_year',
+                            names='line_item',
+                            hole=0.4
+                        )
+                        fig2.update_traces(
+                            texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
+                            textposition='inside',
+                            hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
+                        )
+                        fig2.update_layout(height=500, showlegend=False)
+                        st.plotly_chart(fig2, use_container_width=True)
+                
+                # Year-over-year comparison
+                if 'previous_year' in df_bs.columns and df_bs['previous_year'].sum() > 0:
+                    st.markdown("---")
+                    st.markdown("#### 📊 Year-over-Year Comparison")
+                    
+                    top_items_yoy = df_bs.nlargest(10, 'current_year')[['line_item', 'current_year', 'previous_year']].copy()
+                    top_items_yoy['change'] = top_items_yoy['current_year'] - top_items_yoy['previous_year']
+                    top_items_yoy['change_pct'] = ((top_items_yoy['current_year'] - top_items_yoy['previous_year']) / top_items_yoy['previous_year'] * 100).replace([np.inf, -np.inf], 0).fillna(0)
+                    
+                    fig3 = go.Figure()
+                    fig3.add_trace(go.Bar(
+                        name='Previous Year',
+                        x=top_items_yoy['line_item'],
+                        y=top_items_yoy['previous_year'],
+                        text=[f'{currency_symbol}{v:,.0f}' for v in top_items_yoy['previous_year']],
+                        textposition='outside'
+                    ))
+                    fig3.add_trace(go.Bar(
+                        name='Current Year',
+                        x=top_items_yoy['line_item'],
+                        y=top_items_yoy['current_year'],
+                        text=[f'{currency_symbol}{v:,.0f}' for v in top_items_yoy['current_year']],
+                        textposition='outside'
+                    ))
+                    fig3.update_layout(
+                        barmode='group',
+                        xaxis_title='Item',
+                        yaxis_title=f'Amount ({currency_symbol})',
+                        height=400,
+                        xaxis={'tickangle': -45}
+                    )
+                    st.plotly_chart(fig3, use_container_width=True)
+                
+                # Summary Statistics
+                st.markdown("---")
+                st.markdown("### 📋 Summary Statistics")
+                
+                stats_df = pd.DataFrame({
+                    'Metric': ['Total Items', 'Current Year Total', 'Previous Year Total', 'Highest Value', 'Lowest Value'],
+                    'Value': [
+                        f"{len(df_bs):,}",
+                        f"{currency_symbol}{df_bs['current_year'].sum():,.2f}",
+                        f"{currency_symbol}{df_bs['previous_year'].sum():,.2f}" if 'previous_year' in df_bs.columns else 'Not Available',
+                        f"{currency_symbol}{df_bs['current_year'].max():,.2f}",
+                        f"{currency_symbol}{df_bs['current_year'].min():,.2f}"
+                    ]
+                })
+                st.dataframe(stats_df, use_container_width=True, hide_index=True)
+    
+    elif doc_type in ['p&l_statement', 'pl_statement']:
+        metrics = groq_data.get('financial_metrics', {})
+        col1, col2, col3, col4 = st.columns(4)
         
-        # Summary Statistics
-        st.markdown("---")
-        st.markdown("### 📋 Summary Statistics")
+        with col1:
+            revenue = metrics.get('revenue') or metrics.get('total_income')
+            if revenue:
+                st.metric("Revenue", f"{currency_symbol}{revenue:,.2f}")
+        with col2:
+            expenses = metrics.get('total_expenses')
+            if expenses:
+                st.metric("Total Expenses", f"{currency_symbol}{expenses:,.2f}")
+        with col3:
+            net_income = metrics.get('net_income')
+            if net_income:
+                st.metric("Net Income", f"{currency_symbol}{net_income:,.2f}")
+        with col4:
+            profit_margin = metrics.get('profit_margin')
+            if profit_margin:
+                st.metric("Profit Margin", f"{profit_margin:.2f}%")
         
-        stats_df = pd.DataFrame({
-            'Metric': ['Total Items', 'Total Amount', 'Average Amount', 'Highest Amount', 'Lowest Amount'],
-            'Value': [
-                f"{len(df_items):,}",
-                f"{currency_symbol}{df_items['amount'].sum():,.2f}",
-                f"{currency_symbol}{df_items['amount'].mean():,.2f}",
-                f"{currency_symbol}{df_items['amount'].max():,.2f}",
-                f"{currency_symbol}{df_items['amount'].min():,.2f}"
-            ]
-        })
-        st.dataframe(stats_df, use_container_width=True, hide_index=True)
+        # P&L Visualization
+        if not df_financial.empty and 'current_year' in df_financial.columns:
+            st.markdown("---")
+            st.markdown("### 📈 P&L Analysis")
+            
+            df_pl = df_financial[df_financial['statement_type'] == 'pl_statement'].copy() if 'statement_type' in df_financial.columns else df_financial.copy()
+            
+            if not df_pl.empty and len(df_pl) > 0:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("#### Revenue vs Expenses")
+                    
+                    if 'category' in df_pl.columns:
+                        category_totals = df_pl.groupby('category')['current_year'].sum().reset_index()
+                        
+                        fig1 = px.bar(
+                            category_totals,
+                            x='category',
+                            y='current_year',
+                            labels={'current_year': f'Amount ({currency_symbol})', 'category': 'Category'},
+                            color='category'
+                        )
+                        fig1.update_traces(
+                            texttemplate=f'{currency_symbol}%{{y:,.0f}}',
+                            textposition='outside'
+                        )
+                        fig1.update_layout(height=400, showlegend=False)
+                        st.plotly_chart(fig1, use_container_width=True)
+                
+                with col2:
+                    st.markdown("#### Expense Breakdown")
+                    
+                    expenses_df = df_pl[df_pl['category'] == 'Expenses'].copy() if 'category' in df_pl.columns else df_pl.copy()
+                    
+                    if not expenses_df.empty:
+                        top_expenses = expenses_df.nlargest(8, 'current_year')
+                        
+                        fig2 = px.pie(
+                            top_expenses,
+                            values='current_year',
+                            names='line_item',
+                            hole=0.4
+                        )
+                        fig2.update_traces(
+                            texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.0f}}',
+                            textposition='inside'
+                        )
+                        fig2.update_layout(height=400, showlegend=False)
+                        st.plotly_chart(fig2, use_container_width=True)
+    
     else:
-        st.info("📊 No line items available for visualization")
+        # Invoice/Receipt visualization
+        amounts = groq_data.get('amounts', {})
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total = amounts.get('total')
+            if total:
+                st.metric("Total Amount", f"{currency_symbol}{total:,.2f}")
+        with col2:
+            tax = amounts.get('tax')
+            if tax:
+                st.metric("Tax", f"{currency_symbol}{tax:,.2f}")
+        with col3:
+            subtotal = amounts.get('subtotal')
+            if subtotal:
+                st.metric("Subtotal", f"{currency_symbol}{subtotal:,.2f}")
+        with col4:
+            balance = amounts.get('balance')
+            if balance:
+                st.metric("Balance Due", f"{currency_symbol}{balance:,.2f}")
+        
+        # Charts for invoices
+        if not df_items.empty and 'amount' in df_items.columns and 'description' in df_items.columns:
+            st.markdown("---")
+            st.markdown("### 📈 Visual Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### Top 10 Items by Value")
+                top_items = df_items.nlargest(10, 'amount')
+                
+                fig1 = px.bar(
+                    top_items,
+                    x='amount',
+                    y='description',
+                    orientation='h',
+                    labels={'amount': f'Amount ({currency_symbol})', 'description': 'Item'}
+                )
+                fig1.update_traces(
+                    texttemplate=f'{currency_symbol}%{{x:,.2f}}',
+                    textposition='outside',
+                    hovertemplate=f'<b>%{{y}}</b><br>Amount: {currency_symbol}%{{x:,.2f}}<extra></extra>'
+                )
+                fig1.update_layout(
+                    yaxis={'categoryorder': 'total ascending'},
+                    xaxis=dict(tickformat=',.2f'),
+                    height=400,
+                    showlegend=False
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                st.markdown("#### Distribution")
+                pie_data = df_items.nlargest(10, 'amount')
+                
+                fig2 = px.pie(
+                    pie_data,
+                    values='amount',
+                    names='description',
+                    hole=0.4
+                )
+                fig2.update_traces(
+                    texttemplate='%{label}<br>' + f'{currency_symbol}%{{value:,.2f}}',
+                    textposition='inside',
+                    hovertemplate=f'<b>%{{label}}</b><br>Amount: {currency_symbol}%{{value:,.2f}}<br>Percentage: %{{percent}}<extra></extra>'
+                )
+                fig2.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Summary Statistics
+            st.markdown("---")
+            st.markdown("### 📋 Summary Statistics")
+            
+            stats_df = pd.DataFrame({
+                'Metric': ['Total Items', 'Total Amount', 'Average Amount', 'Highest Amount', 'Lowest Amount'],
+                'Value': [
+                    f"{len(df_items):,}",
+                    f"{currency_symbol}{df_items['amount'].sum():,.2f}",
+                    f"{currency_symbol}{df_items['amount'].mean():,.2f}",
+                    f"{currency_symbol}{df_items['amount'].max():,.2f}",
+                    f"{currency_symbol}{df_items['amount'].min():,.2f}"
+                ]
+            })
+            st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
 # -------------------------
 # Login Page
 # -------------------------
+# -------------------------
+# (Replace the tail of your file with the corrected login page closure + main)
+# -------------------------
+
 def show_login_page():
     """Display login page with SFW Technologies branding"""
     
@@ -388,245 +691,12 @@ def show_login_page():
                 if username == "sfw" and password == "admin":
                     st.session_state.logged_in = True
                     st.session_state.username = username
-                    st.success("✅ Login successful! Redirecting...")
-                    st.rerun()
+                    st.success("✅ Login successful!")
+                    # no explicit rerun call — Streamlit will re-run automatically on interaction
                 else:
                     st.error("❌ Invalid username or password")
                     st.info("💡 Default credentials:\n- Username: **sfw**\n- Password: **admin**")
         
-        st.markdown("---")
-        st.markdown("""
-        <div style='text-align: center; color: #666; font-size: 14px;'>
-            <p>🚀 Powered by Google Cloud Vision API + Groq AI</p>
-            <p>🇮🇳 Optimized for Indian Financial Documents</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-# -------------------------
-# Main Application
-# -------------------------
-def main():
-    st.set_page_config(
-        page_title="SFW Financial Document OCR + AI",
-        page_icon="₹",
-        layout="wide"
-    )
-    
-    # Initialize session state
-    if 'logged_in' not in st.session_state:
-        st.session_state.logged_in = False
-    if 'username' not in st.session_state:
-        st.session_state.username = None
-    
-    # Show login page if not logged in
-    if not st.session_state.logged_in:
-        show_login_page()
-        return
-    
-    # Main application (only shown after login)
-    # Add logout button in sidebar
-    with st.sidebar:
-        st.markdown(f"**👤 Logged in as:** {st.session_state.username}")
-        if st.button("🚪 Logout", use_container_width=True):
-            st.session_state.logged_in = False
-            st.session_state.username = None
-            st.rerun()
-        st.markdown("---")
-    
-    st.title("₹ Universal Financial Document OCR + AI Analysis")
-    st.markdown("**Handles:** Invoices • Receipts • P&L Statements • Balance Sheets • Financial Reports")
-    
-    # Initialize Vision API
-    vision_client = get_vision_client()
-    if not vision_client:
-        st.error("⚠️ Google Cloud Vision API not configured")
-        return
-    
-    # Sidebar
-    st.sidebar.header("⚙️ Upload Document")
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload financial document",
-        type=['pdf', 'png', 'jpg', 'jpeg'],
-        help="PDF or image (max 10MB)"
-    )
-    max_pages = st.sidebar.slider("Max PDF Pages", 1, 20, 10)
-    
-    # Session state
-    if 'extracted_data' not in st.session_state:
-        st.session_state.extracted_data = None
-    if 'ocr_text' not in st.session_state:
-        st.session_state.ocr_text = None
-    
-    # File processing
-    if uploaded_file:
-        file_size = len(uploaded_file.getvalue()) / (1024 * 1024)
-        if file_size > MAX_FILE_SIZE_MB:
-            st.error(f"File too large: {file_size:.1f}MB (max {MAX_FILE_SIZE_MB}MB)")
-            return
-        
-        st.subheader("📤 Document Preview")
-        
-        file_ext = uploaded_file.name.split('.')[-1].lower()
-        file_bytes = uploaded_file.getvalue()
-        
-        # Convert to images
-        if file_ext == 'pdf':
-            with st.spinner("Converting PDF..."):
-                images = pdf_to_images(file_bytes, max_pages)
-            if not images:
-                return
-            display_image = images[0]
-        else:
-            images = [Image.open(io.BytesIO(file_bytes))]
-            display_image = images[0]
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.image(display_image, caption="First Page", use_container_width=True)
-        
-        with col2:
-            st.info(f"📄 **File:** {uploaded_file.name}\n\n📊 **Size:** {file_size:.2f} MB\n\n📑 **Pages:** {len(images)}")
-            
-            if st.button("🚀 Extract & Analyze", type="primary", use_container_width=True):
-                # OCR
-                with st.spinner("🔍 Running OCR..."):
-                    all_text = []
-                    progress = st.progress(0)
-                    
-                    for idx, img in enumerate(images):
-                        progress.progress((idx + 1) / len(images))
-                        img_bytes = prepare_image_for_vision(img)
-                        ocr_result = extract_text_vision_api(img_bytes, vision_client)
-                        
-                        if 'error' in ocr_result:
-                            st.error(f"OCR error page {idx + 1}: {ocr_result['error']}")
-                            continue
-                        
-                        all_text.append(ocr_result['full_text'])
-                    
-                    combined_text = "\n\n".join(all_text)
-                    st.session_state.ocr_text = combined_text
-                    st.success("✅ OCR completed!")
-                
-                # AI Extraction
-                with st.spinner("🤖 AI analyzing..."):
-                    extracted_data = extract_financial_data_with_groq(combined_text)
-                    
-                    if extracted_data:
-                        st.session_state.extracted_data = extracted_data
-                        st.success("✅ Data extracted!")
-                    else:
-                        st.error("❌ Extraction failed")
-    
-    # Display results
-    if st.session_state.extracted_data:
-        data = st.session_state.extracted_data
-        
-        st.markdown("---")
-        st.subheader("📊 Extracted Financial Data")
-        
-        doc_type = safe_get(data, 'document_type', 'Unknown').upper().replace('_', ' ')
-        st.markdown(f"**Document Type:** `{doc_type}`")
-        
-        # Key metrics
-        currency = data.get('currency', 'INR')
-        currency_symbol = '₹' if currency == 'INR' else '$'
-        amounts = data.get('amounts', {})
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Total Amount", safe_format_amount(amounts.get('total'), currency_symbol))
-        with col2:
-            vendor = safe_get(data, 'vendor_name', 'N/A')
-            st.metric("Vendor/Entity", vendor if len(vendor) < 30 else vendor[:27] + '...')
-        with col3:
-            st.metric("Document #", safe_get(data, 'document_number'))
-        with col4:
-            st.metric("Date", safe_get(data, 'document_date'))
-        
-        # Tabs
-        st.markdown("## 📋 Detailed Information")
-        tab1, tab2, tab3, tab4 = st.tabs(["📄 Document Info", "💰 Amounts", "📦 Line Items", "🔍 Raw Data"])
-        
-        with tab1:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Document Details")
-                st.json({
-                    "Type": safe_get(data, 'document_type'),
-                    "Number": safe_get(data, 'document_number'),
-                    "Date": safe_get(data, 'document_date'),
-                    "Due Date": safe_get(data, 'due_date'),
-                    "Currency": currency
-                })
-            with col2:
-                st.markdown("### Party Information")
-                st.json({
-                    "Vendor/Company": safe_get(data, 'vendor_name'),
-                    "Customer": safe_get(data, 'customer_name'),
-                    "Tax ID": safe_get(data, 'tax_id')
-                })
-        
-        with tab2:
-            st.markdown("### 💰 Financial Summary")
-            amounts_df = pd.DataFrame([
-                {"Category": "Subtotal", "Amount": safe_format_amount(amounts.get('subtotal'), currency_symbol)},
-                {"Category": "Tax", "Amount": safe_format_amount(amounts.get('tax'), currency_symbol)},
-                {"Category": "Discount", "Amount": safe_format_amount(amounts.get('discount'), currency_symbol)},
-                {"Category": "Total", "Amount": safe_format_amount(amounts.get('total'), currency_symbol)},
-                {"Category": "Paid", "Amount": safe_format_amount(amounts.get('paid'), currency_symbol)},
-                {"Category": "Balance Due", "Amount": safe_format_amount(amounts.get('balance'), currency_symbol)}
-            ])
-            st.dataframe(amounts_df, use_container_width=True, hide_index=True)
-            
-            # Financial metrics
-            metrics = data.get('financial_metrics', {})
-            if any(metrics.values()):
-                st.markdown("### 📈 Financial Metrics")
-                metrics_df = pd.DataFrame([
-                    {"Metric": "Revenue", "Value": safe_format_amount(metrics.get('revenue'), currency_symbol)},
-                    {"Metric": "Expenses", "Value": safe_format_amount(metrics.get('expenses'), currency_symbol)},
-                    {"Metric": "Net Income", "Value": safe_format_amount(metrics.get('net_income'), currency_symbol)},
-                    {"Metric": "Profit Margin", "Value": f"{metrics.get('profit_margin', 0):.2f}%" if metrics.get('profit_margin') else 'N/A'}
-                ])
-                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
-        
-        with tab3:
-            line_items = data.get('line_items', [])
-            if line_items:
-                st.markdown(f"### 📦 Line Items ({len(line_items)} items)")
-                df_items, df_summary = create_dataframes(data)
-                
-                if not df_items.empty:
-                    st.dataframe(df_items, use_container_width=True, hide_index=True)
-                    csv = df_items.to_csv(index=False)
-                    st.download_button(
-                        "📥 Download CSV",
-                        csv,
-                        "line_items.csv",
-                        "text/csv",
-                        use_container_width=True
-                    )
-            else:
-                st.info("No line items found")
-        
-        with tab4:
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("### Structured Data")
-                st.json(data)
-            with col2:
-                st.markdown("### Raw OCR Text")
-                if st.session_state.ocr_text:
-                    st.text_area("", st.session_state.ocr_text, height=400, label_visibility="collapsed")
-        
-        # Dashboard
-        if data.get('line_items') or data.get('amounts'):
-            df_items, df_summary = create_dataframes(data)
-            show_dashboard(data, df_items, df_summary)
-    
     # Footer
     st.markdown("---")
     st.markdown("""
@@ -635,6 +705,122 @@ def main():
         🇮🇳 Optimized for Indian Financial Documents (₹)</small>
     </div>
     """, unsafe_allow_html=True)
+
+
+
+def main():
+    """Main entrypoint for the Streamlit app"""
+    st.set_page_config(page_title="Universal Financial Document OCR", layout="wide")
+    
+    # init session state
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+    if "username" not in st.session_state:
+        st.session_state.username = None
+    
+    # Simple nav: login vs app
+    if not st.session_state.logged_in:
+        show_login_page()
+        return
+    
+    # Logged-in app UI
+    st.sidebar.header(f"Welcome, {st.session_state.username}")
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.username = None
+    
+    st.title("📥 Upload Financial Document (Invoice / P&L / Balance Sheet)")
+    uploaded = st.file_uploader("Upload PDF / PNG / JPG (max 10MB)", type=['pdf', 'png', 'jpg', 'jpeg'], accept_multiple_files=False)
+    
+    if uploaded is None:
+        st.info("Upload a document to begin OCR → Structured extraction → Dashboard")
+        return
+    
+    # size guard
+    uploaded.seek(0, os.SEEK_END)
+    size_mb = uploaded.tell() / (1024 * 1024)
+    uploaded.seek(0)
+    if size_mb > MAX_FILE_SIZE_MB:
+        st.error(f"File too large ({size_mb:.1f} MB). Max allowed: {MAX_FILE_SIZE_MB} MB.")
+        return
+    
+    # convert to images (if pdf) or load image
+    file_bytes = uploaded.read()
+    file_type = uploaded.type if hasattr(uploaded, "type") else uploaded.name.split('.')[-1].lower()
+    
+    images = []
+    if uploaded.name.lower().endswith('.pdf'):
+        images = pdf_to_images(file_bytes, max_pages=10)
+        if not images:
+            st.error("Failed to convert PDF pages to images.")
+            return
+    else:
+        try:
+            pil_img = Image.open(io.BytesIO(file_bytes))
+            images = [pil_img.convert('RGB')]
+        except Exception as e:
+            st.error(f"Failed to read image file: {e}")
+            return
+    
+    # Initialize Vision client
+    vision_client = get_vision_client()
+    if vision_client is None:
+        st.error("Vision API client could not be initialized. Check credentials.")
+        return
+    
+    # OCR each page and concatenate text
+    full_texts = []
+    confidences = []
+    words_all = []
+    with st.spinner("Running OCR (Google Vision API)..."):
+        for i, img in enumerate(images):
+            try:
+                img_bytes = prepare_image_for_vision(img)
+                ocr_result = extract_text_vision_api(img_bytes, vision_client)
+                if 'error' in ocr_result:
+                    st.error(f"OCR error on page {i+1}: {ocr_result['error']}")
+                else:
+                    full_texts.append(ocr_result.get('full_text', ''))
+                    confidences.append(ocr_result.get('avg_confidence', 0))
+                    words_all.extend(ocr_result.get('words', []))
+            except Exception as e:
+                st.error(f"Unexpected OCR failure on page {i+1}: {e}")
+    
+    combined_text = "\n\n".join([t for t in full_texts if t])
+    avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    
+    st.markdown(f"**OCR Average Confidence:** {avg_conf:.2f}")
+    st.expander("🔍 Show OCR text", expanded=False).write(combined_text[:20000] or "No text recognized")
+    
+    # Ask user to continue with Groq extraction
+    if st.button("Extract structured financial data (Groq)"):
+        with st.spinner("Extracting structured data with Groq AI..."):
+            groq_data = extract_financial_data_with_groq(combined_text)
+        
+        if groq_data is None:
+            st.error("Extraction failed or returned no data.")
+            return
+        
+        # Show raw JSON and create dataframes
+        st.subheader("Extracted JSON")
+        st.json(groq_data)
+        
+        df_items, df_financial, df_summary = create_dataframes(groq_data)
+        
+        # Show dashboard
+        show_dashboard(groq_data, df_items, df_financial, df_summary)
+        
+        # Data exports
+        with st.expander("Download extracted tables"):
+            if not df_items.empty:
+                csv_items = df_items.to_csv(index=False).encode('utf-8')
+                st.download_button("Download line items CSV", data=csv_items, file_name="line_items.csv", mime="text/csv")
+            if not df_financial.empty:
+                csv_fin = df_financial.to_csv(index=False).encode('utf-8')
+                st.download_button("Download financials CSV", data=csv_fin, file_name="financials.csv", mime="text/csv")
+            csv_summary = df_summary.to_csv(index=False).encode('utf-8')
+            st.download_button("Download summary CSV", data=csv_summary, file_name="summary.csv", mime="text/csv")
+
 
 if __name__ == "__main__":
     main()
